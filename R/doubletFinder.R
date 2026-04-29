@@ -30,8 +30,11 @@
 #' @param sct Logical representing whether SCTransform was used during original
 #' Seurat object pre-processing (default = FALSE).
 #' @param annotations annotations.
-#' @return Seurat object with updated metadata including pANN and doublet
-#' classifications.
+#' @param return.details Logical; if TRUE, return a list with the Seurat object
+#' and detailed artificial-doublet and neighbor information for debugging.
+#' @return By default, Seurat object with updated metadata including pANN and
+#' doublet classifications. If \code{return.details = TRUE}, returns a list
+#' with \code{$seu} and \code{$details}.
 #' @author Chris McGinnis
 #' @export
 #' @importFrom Seurat GetAssayData Cells CreateSeuratObject NormalizeData
@@ -63,7 +66,8 @@ doubletFinder <- function(seu,
                           nExp,
                           reuse.pANN = NULL,
                           sct = FALSE,
-                          annotations = NULL) {
+                          annotations = NULL,
+                          return.details = FALSE) {
 
   ## Generate new list of doublet classificatons from existing pANN vector to save time
   if (!is.null(reuse.pANN)) {
@@ -71,6 +75,15 @@ doubletFinder <- function(seu,
     classifications <- rep("Singlet", length(pANN.old))
     classifications[order(pANN.old, decreasing=TRUE)[1:nExp]] <- "Doublet"
     seu@meta.data[, paste("DF.classifications",pN,pK,nExp,sep="_")] <- classifications
+    if (isTRUE(return.details)) {
+      return(list(
+        seu = seu,
+        details = list(
+          mode = "reuse.pANN",
+          message = "reuse.pANN mode does not regenerate artificial doublets or neighbors."
+        )
+      ))
+    }
     return(seu)
   } else {
     ## Make merged real-artifical data
@@ -193,6 +206,38 @@ doubletFinder <- function(seu,
         }
       }
     }
+
+    # Build a per-cell neighbor table to expose artificial-neighbor identities.
+    neighbor_table <- vector("list", n_real.cells)
+    for (i in seq_len(n_real.cells)) {
+      neighbors <- order(dist.mat[, i])
+      neighbors <- neighbors[2:(k + 1)]
+      is_artificial <- neighbors > n_real.cells
+      artificial_index <- ifelse(is_artificial, neighbors - n_real.cells, NA_integer_)
+      artificial_id <- ifelse(is_artificial, colnames(doublets)[artificial_index], NA_character_)
+      parent_1 <- ifelse(is_artificial, real.cells1[artificial_index], NA_character_)
+      parent_2 <- ifelse(is_artificial, real.cells2[artificial_index], NA_character_)
+
+      neighbor_table[[i]] <- data.frame(
+        real_cell = real.cells[i],
+        neighbor_rank = seq_along(neighbors),
+        neighbor_cell = cell.names[neighbors],
+        is_artificial = is_artificial,
+        artificial_id = artificial_id,
+        parent_1 = parent_1,
+        parent_2 = parent_2,
+        stringsAsFactors = FALSE
+      )
+    }
+    neighbor_table <- do.call(rbind, neighbor_table)
+
+    artificial_pairs <- data.frame(
+      artificial_id = colnames(doublets),
+      parent_1 = real.cells1,
+      parent_2 = real.cells2,
+      stringsAsFactors = FALSE
+    )
+
     print("Classifying doublets..")
     classifications <- rep("Singlet",n_real.cells)
     classifications[order(pANN$pANN[1:n_real.cells], decreasing=TRUE)[1:nExp]] <- "Doublet"
@@ -203,6 +248,22 @@ doubletFinder <- function(seu,
       for(ct in levels(doublet_types1)){
         seu@meta.data[, paste("DF.doublet.contributors",pN,pK,nExp,ct,sep="_")] <- neighbor_types[,ct]
       }
+    }
+
+    if (isTRUE(return.details)) {
+      details <- list(
+        pN = pN,
+        pK = pK,
+        nExp = nExp,
+        n_real.cells = n_real.cells,
+        n_doublets = n_doublets,
+        real_cell_ids = real.cells,
+        artificial_ids = colnames(doublets),
+        artificial_pairs = artificial_pairs,
+        neighbor_table = neighbor_table,
+        pANN = pANN
+      )
+      return(list(seu = seu, details = details))
     }
     return(seu)
   }
